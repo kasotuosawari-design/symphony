@@ -749,6 +749,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+    comment_on_blocked_issue(issue_id, running_entry, error)
+
     blocked_entry = %{
       issue_id: issue_id,
       identifier: Map.get(running_entry, :identifier, issue_id),
@@ -771,6 +773,26 @@ defmodule SymphonyElixir.Orchestrator do
         blocked: Map.put(state.blocked, issue_id, blocked_entry)
     }
   end
+
+  defp comment_on_blocked_issue(issue_id, running_entry, error) when is_binary(issue_id) do
+    identifier = Map.get(running_entry, :identifier, issue_id)
+    body = "Symphony blocked #{identifier}.\n\nReason: #{error}"
+
+    case Tracker.create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.debug("Failed to create blocked-issue comment for issue_id=#{issue_id}: #{inspect(reason)}")
+        :ok
+    end
+  rescue
+    exception ->
+      Logger.debug("Failed to create blocked-issue comment for issue_id=#{issue_id}: #{Exception.message(exception)}")
+      :ok
+  end
+
+  defp comment_on_blocked_issue(_issue_id, _running_entry, _error), do: :ok
 
   defp choose_issues(issues, state) do
     active_states = active_state_set()
