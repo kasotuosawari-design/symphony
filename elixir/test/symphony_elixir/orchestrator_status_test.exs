@@ -25,6 +25,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       :ok
     end
+
+    def create_comment(issue_id, body) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_comment_called, issue_id, body})
+
+        _ ->
+          :ok
+      end
+
+      :ok
+    end
   end
 
   defmodule FakeTrackerUpdateInReviewError do
@@ -38,6 +50,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
 
       {:error, :boom}
+    end
+
+    def create_comment(issue_id, body) do
+      case Application.get_env(:symphony_elixir, :tracker_comment_recipient) do
+        recipient when is_pid(recipient) ->
+          send(recipient, {:tracker_comment_called, issue_id, body})
+
+        _ ->
+          :ok
+      end
+
+      :ok
     end
   end
 
@@ -1713,6 +1737,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-BR-BLK"
     }
 
+    previous_tracker_module = Application.get_env(:symphony_elixir, :tracker_module)
+    previous_tracker_comment_recipient = Application.get_env(:symphony_elixir, :tracker_comment_recipient)
+
+    on_exit(fn ->
+      if is_nil(previous_tracker_module) do
+        Application.delete_env(:symphony_elixir, :tracker_module)
+      else
+        Application.put_env(:symphony_elixir, :tracker_module, previous_tracker_module)
+      end
+
+      if is_nil(previous_tracker_comment_recipient) do
+        Application.delete_env(:symphony_elixir, :tracker_comment_recipient)
+      else
+        Application.put_env(:symphony_elixir, :tracker_comment_recipient, previous_tracker_comment_recipient)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :tracker_module, FakeTrackerUpdateInReview)
+    Application.put_env(:symphony_elixir, :tracker_comment_recipient, self())
+
     orchestrator_name = Module.concat(__MODULE__, :BranchSnapshotBlockedOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1750,6 +1794,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
+
+    assert_receive {:tracker_comment_called, ^issue_id, comment}
+    assert comment =~ "Symphony blocked MT-BR-BLK"
+    assert comment =~ "codex turn requires operator input"
 
     snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
     assert %{blocked: [snapshot_entry]} = snapshot

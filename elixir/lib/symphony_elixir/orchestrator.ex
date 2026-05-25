@@ -868,7 +868,7 @@ defmodule SymphonyElixir.Orchestrator do
     identifier = Map.get(running_entry, :identifier, issue_id)
     body = "Symphony blocked #{identifier}.\n\nReason: #{error}"
 
-    case Tracker.create_comment(issue_id, body) do
+    case tracker_module().create_comment(issue_id, body) do
       :ok ->
         :ok
 
