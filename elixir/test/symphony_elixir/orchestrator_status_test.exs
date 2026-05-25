@@ -1309,6 +1309,49 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.branch_name == "feature/branch-snapshot-blocked"
   end
 
+  test "orchestrator snapshot supports blocked entries without issue payload" do
+    issue_id = "issue-branch-missing-issue-blocked"
+
+    orchestrator_name = Module.concat(__MODULE__, :BranchSnapshotBlockedNoIssueOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    blocked_entry = %{
+      identifier: "MT-BR-NO",
+      error: "manual regression",
+      worker_host: "dm-dev2",
+      workspace_path: "/workspaces/MT-BR-NO",
+      session_id: "thread-no-issue",
+      blocked_at: DateTime.utc_now(),
+      last_codex_timestamp: DateTime.utc_now(),
+      last_codex_message: %{
+        event: :notification,
+        message: %{method: "thread/inputRequired"},
+        timestamp: DateTime.utc_now()
+      },
+      last_codex_event: :turn_input_required
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:blocked, %{issue_id => blocked_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    snapshot = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert %{blocked: [snapshot_entry]} = snapshot
+    assert snapshot_entry.issue_id == issue_id
+    assert snapshot_entry.identifier == "MT-BR-NO"
+    assert snapshot_entry.branch_name == nil
+  end
+
   test "status dashboard renders offline marker to terminal" do
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
