@@ -1135,9 +1135,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator blocks max-turn active issue exits instead of retrying" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", tracker_api_token: nil)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     issue_id = "issue-max-turn-block"
+    issue = %Issue{id: issue_id, identifier: "MT-MAX", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     orchestrator_name = Module.concat(__MODULE__, :MaxTurnBlockOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -1154,7 +1157,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: self(),
       ref: ref,
       identifier: "MT-MAX",
-      issue: %Issue{id: issue_id, identifier: "MT-MAX", state: "In Progress"},
+      issue: issue,
       session_id: "thread-max-turns",
       last_codex_message: nil,
       last_codex_timestamp: nil,
@@ -1181,6 +1184,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              identifier: "MT-MAX",
              error: "agent.max_turns reached while Linear issue stayed active"
            } = state.blocked[issue_id]
+
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}
+    assert comment =~ "Symphony blocked MT-MAX"
+    assert comment =~ "agent.max_turns reached while Linear issue stayed active"
   end
 
   test "status dashboard renders offline marker to terminal" do
