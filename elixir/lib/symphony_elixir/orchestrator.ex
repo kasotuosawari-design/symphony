@@ -201,16 +201,29 @@ defmodule SymphonyElixir.Orchestrator do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
     else
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+      case branch_name_and_workspace(running_entry) do
+        {:ok, branch_name, workspace_path} ->
+          handle_normal_completion_with_pr_check(
+            state,
+            issue_id,
+            running_entry,
+            session_id,
+            branch_name,
+            workspace_path
+          )
 
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+        :missing ->
+          Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+          state
+          |> complete_issue(issue_id)
+          |> schedule_issue_retry(issue_id, 1, %{
+            identifier: running_entry.identifier,
+            delay_type: :continuation,
+            worker_host: Map.get(running_entry, :worker_host),
+            workspace_path: Map.get(running_entry, :workspace_path)
+          })
+      end
     end
   end
 
@@ -225,6 +238,67 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
+  end
+
+  defp handle_normal_completion_with_pr_check(
+         state,
+         issue_id,
+         running_entry,
+         session_id,
+         branch_name,
+         workspace_path
+       ) do
+    case lookup_pr_for_branch(workspace_path, branch_name) do
+      {:ok, %{} = _pr} ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          delay_type: :continuation,
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
+
+      {:ok, nil} ->
+        error = "no GitHub PR found for branch #{branch_name}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+
+      {:error, reason} ->
+        error = "GitHub PR lookup failed for branch #{branch_name}: #{inspect(reason)}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+
+      _other ->
+        error = "GitHub PR lookup returned unexpected result for branch #{branch_name}"
+        Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
+        block_issue_from_entry(state, issue_id, running_entry, error)
+    end
+  end
+
+  defp branch_name_and_workspace(%{branch_name: branch_name, workspace_path: workspace_path})
+       when is_binary(branch_name) and is_binary(workspace_path),
+       do: {:ok, branch_name, workspace_path}
+
+  defp branch_name_and_workspace(%{issue: %Issue{branch_name: branch_name}, workspace_path: workspace_path})
+       when is_binary(branch_name) and is_binary(workspace_path),
+       do: {:ok, branch_name, workspace_path}
+
+  defp branch_name_and_workspace(_running_entry), do: :missing
+
+  defp lookup_pr_for_branch(workspace_path, branch_name)
+       when is_binary(workspace_path) and is_binary(branch_name) do
+    github_pr_lookup_module().lookup_workspace_head(workspace_path, branch_name)
+  end
+
+  defp lookup_pr_for_branch(_workspace_path, _branch_name) do
+    {:error, :invalid_pr_lookup_input}
+  end
+
+  defp github_pr_lookup_module do
+    Application.get_env(:symphony_elixir, :github_pr_lookup, SymphonyElixir.GitHubPrLookup)
   end
 
   defp max_turns_reached_active_issue?({:max_turns_reached_active_issue, _issue_id}), do: true

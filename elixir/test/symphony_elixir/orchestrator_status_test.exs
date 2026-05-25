@@ -1,6 +1,18 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
 
+  defmodule FakeGitHubPrLookupNone do
+    def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, nil}
+  end
+
+  defmodule FakeGitHubPrLookupFound do
+    def lookup_workspace_head(_workspace_path, _branch_name), do: {:ok, %{"number" => 123, "url" => "https://example.org/pull/123"}}
+  end
+
+  defmodule FakeGitHubPrLookupError do
+    def lookup_workspace_head(_workspace_path, _branch_name), do: {:error, :missing_auth}
+  end
+
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
     parent = self()
@@ -1138,6 +1150,205 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{
              identifier: "MT-INPUT-NORMAL",
              error: "codex turn requires operator input"
+           } = state.blocked[issue_id]
+  end
+
+  test "orchestrator blocks normal worker exits when branch has no discoverable PR" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupNone)
+
+    issue_id = "issue-normal-no-pr"
+    orchestrator_name = Module.concat(__MODULE__, :NormalNoPrOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-NO-PR",
+      branch_name: "feature/no-pr",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-no-pr",
+      session_id: "thread-no-pr",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    assert %{
+             identifier: "MT-NO-PR",
+             error: "no GitHub PR found for branch feature/no-pr"
+           } = state.blocked[issue_id]
+  end
+
+  test "orchestrator retries normal exit with discoverable PR" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupFound)
+
+    issue_id = "issue-normal-pr-found"
+    orchestrator_name = Module.concat(__MODULE__, :NormalPrFoundOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PR-FOUND",
+      branch_name: "feature/pr-found",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-pr-found",
+      session_id: "thread-pr-found",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert MapSet.member?(state.completed, issue_id)
+    assert Map.has_key?(state.retry_attempts, issue_id)
+  end
+
+  test "orchestrator blocks normal exits when PR lookup fails" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+
+    previous_lookup = Application.get_env(:symphony_elixir, :github_pr_lookup)
+
+    on_exit(fn ->
+      if is_nil(previous_lookup) do
+        Application.delete_env(:symphony_elixir, :github_pr_lookup)
+      else
+        Application.put_env(:symphony_elixir, :github_pr_lookup, previous_lookup)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :github_pr_lookup, FakeGitHubPrLookupError)
+
+    issue_id = "issue-normal-pr-error"
+    orchestrator_name = Module.concat(__MODULE__, :NormalPrErrorOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PR-ERROR",
+      branch_name: "feature/pr-error",
+      state: "In Progress"
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      workspace_path: "/tmp/mt-pr-error",
+      session_id: "thread-pr-error",
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute MapSet.member?(state.completed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    assert %{
+             identifier: "MT-PR-ERROR",
+             error: "GitHub PR lookup failed for branch feature/pr-error: :missing_auth"
            } = state.blocked[issue_id]
   end
 
